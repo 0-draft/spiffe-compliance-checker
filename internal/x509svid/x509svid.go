@@ -6,6 +6,7 @@ package x509svid
 
 import (
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"net/url"
@@ -14,6 +15,12 @@ import (
 	"github.com/0-draft/spiffe-compliance-checker/internal/id"
 	"github.com/0-draft/spiffe-compliance-checker/internal/report"
 	"github.com/0-draft/spiffe-compliance-checker/internal/spec"
+)
+
+// RFC 5280 standard X.509 extension OIDs.
+var (
+	oidKeyUsage         = asn1.ObjectIdentifier{2, 5, 29, 15}
+	oidSubjectAltName   = asn1.ObjectIdentifier{2, 5, 29, 17}
 )
 
 // CheckFile reads a certificate from path and runs Check on it.
@@ -37,18 +44,35 @@ func parseCert(raw []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(raw)
 }
 
-// Check evaluates X509-SVID.md against cert and appends assertions to r.
+// Check evaluates X509-SVID.md against cert and appends assertions to r. A
+// nil cert is treated as a no-op so callers do not need to guard against
+// parse failures upstream.
 func Check(r *report.Report, cert *x509.Certificate) {
+	if cert == nil {
+		return
+	}
 	uri := checkURISAN(r, cert)
 	isLeaf := !cert.IsCA
 
 	checkBasicConstraints(r, cert, isLeaf)
 	checkKeyUsage(r, cert, isLeaf)
 	checkEKU(r, cert, isLeaf)
+	checkSANCritical(r, cert)
 
 	if uri != nil {
 		checkSPIFFEID(r, uri, isLeaf)
 	}
+}
+
+// extensionCritical reports whether the extension with the given OID is
+// present in cert and, if so, whether it is marked critical.
+func extensionCritical(cert *x509.Certificate, oid asn1.ObjectIdentifier) (critical, found bool) {
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(oid) {
+			return ext.Critical, true
+		}
+	}
+	return false, false
 }
 
 func checkURISAN(r *report.Report, cert *x509.Certificate) *url.URL {
@@ -87,14 +111,19 @@ func checkBasicConstraints(r *report.Report, cert *x509.Certificate, isLeaf bool
 }
 
 func checkKeyUsage(r *report.Report, cert *x509.Certificate, isLeaf bool) {
-	// §4.3: Key Usage MUST be set. Whether it is critical cannot be inspected
-	// via crypto/x509's parsed view; we treat KeyUsage != 0 as "set" and
-	// emit a PASS for presence only.
-	if cert.KeyUsage == 0 {
-		r.Fail(spec.X509KeyUsageCritical, "Key Usage extension not set")
+	// §4.3: Key Usage MUST be set and MUST be marked critical. Both
+	// conditions are inspected on the raw extension so we catch the
+	// criticality flag, which crypto/x509's parsed KeyUsage field discards.
+	crit, found := extensionCritical(cert, oidKeyUsage)
+	switch {
+	case !found:
+		r.Fail(spec.X509KeyUsageCritical, "Key Usage extension absent")
 		return
+	case !crit:
+		r.Fail(spec.X509KeyUsageCritical, "Key Usage extension not marked critical")
+	default:
+		r.Pass(spec.X509KeyUsageCritical, "")
 	}
-	r.Pass(spec.X509KeyUsageCritical, "")
 
 	if isLeaf {
 		// digitalSignature MUST be set.
@@ -121,6 +150,26 @@ func checkKeyUsage(r *report.Report, cert *x509.Certificate, isLeaf bool) {
 		r.Fail(spec.X509SigningKeyCertSign,
 			fmt.Sprintf("KeyUsage=0x%x missing CertSign", cert.KeyUsage))
 	}
+}
+
+// checkSANCritical enforces X509-SVID.md §3.1: when Subject is omitted, the
+// SAN extension MUST be marked critical. Per RFC 5280, an empty Subject
+// DN is encoded as an empty DER SEQUENCE (`30 00`, length 2), so any
+// shorter or equal-length RawSubject is treated as empty.
+func checkSANCritical(r *report.Report, cert *x509.Certificate) {
+	if len(cert.RawSubject) > 2 {
+		return // Subject present, the conditional clause does not apply.
+	}
+	crit, found := extensionCritical(cert, oidSubjectAltName)
+	if !found {
+		return // already caught by URI SAN count check
+	}
+	if !crit {
+		r.Fail(spec.X509SANCriticalWhenNoSubject,
+			"Subject is empty but SAN extension is not marked critical")
+		return
+	}
+	r.Pass(spec.X509SANCriticalWhenNoSubject, "")
 }
 
 func checkEKU(r *report.Report, cert *x509.Certificate, isLeaf bool) {

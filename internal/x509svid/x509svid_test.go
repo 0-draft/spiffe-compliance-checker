@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"math/big"
 	"net/url"
 	"strings"
@@ -182,6 +183,60 @@ func TestLeafFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestKeyUsageNotCriticalFails(t *testing.T) {
+	// Build a cert with KU present but explicitly NOT critical by hand-
+	// rolling the extension. Go's x509.CreateCertificate always sets KU
+	// critical when populated via the high-level fields, so we override
+	// via ExtraExtensions.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// KU bit pattern: digitalSignature (bit 0). DER encoding of BIT STRING
+	// `1000 0000` is 03 02 07 80.
+	kuValue := []byte{0x03, 0x02, 0x07, 0x80}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		URIs:                  []*url.URL{mustURI(t, "spiffe://example.com/a")},
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+		ExtraExtensions: []pkix.Extension{
+			{Id: asn1.ObjectIdentifier{2, 5, 29, 15}, Critical: false, Value: kuValue},
+		},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &report.Report{}
+	x509svid.Check(r, cert)
+	if !r.Failed() {
+		t.Fatal("expected failure when KU not marked critical")
+	}
+	var buf strings.Builder
+	r.Write(&buf)
+	if !strings.Contains(buf.String(), "not marked critical") {
+		t.Errorf("expected 'not marked critical' in report:\n%s", buf.String())
+	}
+}
+
+func TestNilCertIsNoOp(t *testing.T) {
+	r := &report.Report{}
+	x509svid.Check(r, nil)
+	if r.Failed() || len(r.Assertions) != 0 {
+		t.Fatalf("nil cert should be a no-op, got %d assertions", len(r.Assertions))
 	}
 }
 
