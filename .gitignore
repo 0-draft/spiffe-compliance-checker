@@ -1,0 +1,21 @@
+# Binaries
+/scc
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local-only
+.claude/
+CLAUDE.md
