@@ -5,6 +5,8 @@ package bundle
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -155,6 +157,25 @@ func checkX509Entry(r *report.Report, keyTag string, jwk map[string]any) {
 	if len(x5c) != 1 {
 		r.Fail(spec.BundleX509X5CPresent,
 			fmt.Sprintf("%s: x5c has %d entries, want 1", keyTag, len(x5c)))
+		return
+	}
+	// X509-SVID.md §6.1: x5c entry MUST be a base64-encoded DER X.509
+	// certificate. Confirm both encoding and parseability.
+	certStr, ok := x5c[0].(string)
+	if !ok {
+		r.Fail(spec.BundleX509X5CPresent,
+			fmt.Sprintf("%s: x5c[0] is %T, want string", keyTag, x5c[0]))
+		return
+	}
+	der, err := base64.StdEncoding.DecodeString(certStr)
+	if err != nil {
+		r.Fail(spec.BundleX509X5CPresent,
+			fmt.Sprintf("%s: x5c[0] is not valid base64: %v", keyTag, err))
+		return
+	}
+	if _, err := x509.ParseCertificate(der); err != nil {
+		r.Fail(spec.BundleX509X5CPresent,
+			fmt.Sprintf("%s: x5c[0] is not a parseable X.509 cert: %v", keyTag, err))
 		return
 	}
 	r.Pass(spec.BundleX509X5CPresent, keyTag)

@@ -242,21 +242,82 @@ func TestNilCertIsNoOp(t *testing.T) {
 	}
 }
 
-func TestSigningWithLeafKeyUsageFails(t *testing.T) {
-	cert := mkCert(t, certOpts{
-		uris:     []*url.URL{mustURI(t, "spiffe://example.com")},
-		isCA:     true,
-		keyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-	})
+func TestSigningWithForbiddenKeyUsageFails(t *testing.T) {
+	cases := []struct {
+		name string
+		ku   x509.KeyUsage
+	}{
+		{"digitalSignature (leaf-only)", x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature},
+		{"dataEncipherment (outside both sets)", x509.KeyUsageCertSign | x509.KeyUsageDataEncipherment},
+		{"contentCommitment (outside both sets)", x509.KeyUsageCertSign | x509.KeyUsageContentCommitment},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := mkCert(t, certOpts{
+				uris:     []*url.URL{mustURI(t, "spiffe://example.com")},
+				isCA:     true,
+				keyUsage: tc.ku,
+			})
+			r := &report.Report{}
+			x509svid.Check(r, cert)
+			if !r.Failed() {
+				t.Fatalf("expected failure when signing cert sets %s", tc.name)
+			}
+			var buf strings.Builder
+			r.Write(&buf)
+			if !strings.Contains(buf.String(), "outside {keyCertSign, cRLSign}") {
+				t.Errorf("expected forbidden-bits message in report:\n%s", buf.String())
+			}
+		})
+	}
+}
+
+func TestLeafEKUWithUnknownOIDStillTriggersCheck(t *testing.T) {
+	// Cert has an EKU extension but Go can't recognise the OID, so the
+	// parsed cert.ExtKeyUsage is empty while cert.UnknownExtKeyUsage has
+	// one entry. The presence check must use both fields.
+	unknownOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		URIs:                  []*url.URL{mustURI(t, "spiffe://example.com/a")},
+		UnknownExtKeyUsage:    []asn1.ObjectIdentifier{unknownOID},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cert.ExtKeyUsage) != 0 {
+		t.Fatalf("test precondition: expected ExtKeyUsage empty, got %v", cert.ExtKeyUsage)
+	}
+	if len(cert.UnknownExtKeyUsage) == 0 {
+		t.Fatal("test precondition: expected UnknownExtKeyUsage populated")
+	}
 	r := &report.Report{}
 	x509svid.Check(r, cert)
+	// EKU is present (via the unknown OID) but serverAuth/clientAuth are
+	// missing, so the MUST clause should fail, not be skipped.
 	if !r.Failed() {
-		t.Fatal("expected failure when signing cert sets digitalSignature")
+		var buf strings.Builder
+		r.Write(&buf)
+		t.Fatalf("expected serverAuth/clientAuth failure:\n%s", buf.String())
 	}
 	var buf strings.Builder
 	r.Write(&buf)
-	if !strings.Contains(buf.String(), "leaf-only bits") {
-		t.Errorf("expected 'leaf-only bits' in report:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "serverAuth=false clientAuth=false") {
+		t.Errorf("expected EKU MUST-bits failure, got:\n%s", buf.String())
 	}
 }
 
