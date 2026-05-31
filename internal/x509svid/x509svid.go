@@ -162,15 +162,15 @@ func checkKeyUsage(r *report.Report, cert *x509.Certificate, isLeaf bool) {
 			fmt.Sprintf("KeyUsage=0x%x missing CertSign", cert.KeyUsage))
 	}
 
-	// Per X509-SVID.md Appendix A: leaf-only KU bits (digitalSignature,
-	// keyEncipherment, keyAgreement) are valid "if and only if" the SVID
-	// is a leaf — so they MUST NOT appear on signing certificates.
-	const leafOnlyKU = x509.KeyUsageDigitalSignature |
-		x509.KeyUsageKeyEncipherment |
-		x509.KeyUsageKeyAgreement
-	if cert.KeyUsage&leafOnlyKU != 0 {
+	// Per X509-SVID.md Appendix A: signing certs MUST be limited to
+	// keyCertSign and (optionally) cRLSign. Bitmask-out the permitted set
+	// and any remaining bit (digitalSignature, keyEncipherment,
+	// keyAgreement, dataEncipherment, contentCommitment, encipherOnly,
+	// decipherOnly) is a violation.
+	const allowedSigningKU = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+	if cert.KeyUsage&^allowedSigningKU != 0 {
 		r.Fail(spec.X509SigningNoOtherKeyUsage,
-			fmt.Sprintf("KeyUsage=0x%x sets leaf-only bits", cert.KeyUsage))
+			fmt.Sprintf("KeyUsage=0x%x sets bits outside {keyCertSign, cRLSign}", cert.KeyUsage))
 	} else {
 		r.Pass(spec.X509SigningNoOtherKeyUsage, "")
 	}
@@ -201,8 +201,10 @@ func checkEKU(r *report.Report, cert *x509.Certificate, isLeaf bool) {
 		return
 	}
 	// §4.4: leaf SHOULD include EKU; when included, MUST contain both
-	// serverAuth and clientAuth.
-	if len(cert.ExtKeyUsage) == 0 {
+	// serverAuth and clientAuth. EKU "presence" includes the case where
+	// the extension is set but contains only OIDs Go does not recognize
+	// (those land in UnknownExtKeyUsage, leaving ExtKeyUsage empty).
+	if len(cert.ExtKeyUsage) == 0 && len(cert.UnknownExtKeyUsage) == 0 {
 		r.Fail(spec.X509LeafEKURecommended, "EKU extension absent")
 		return
 	}

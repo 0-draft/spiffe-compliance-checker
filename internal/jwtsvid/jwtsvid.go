@@ -99,11 +99,16 @@ func checkClaims(r *report.Report, p map[string]any) {
 		id.Check(r, sub)
 	}
 
-	// §3.2: aud MUST be present with one or more values.
-	auds, present := extractAud(p)
+	// §3.2: aud MUST be present with one or more values. RFC 7519 says
+	// aud is a string or array of strings; anything else, or an array
+	// with non-string elements, is rejected.
+	auds, valid, present := extractAud(p)
 	switch {
 	case !present:
 		r.Fail(spec.JWTAudPresent, "aud claim absent")
+	case !valid:
+		r.Fail(spec.JWTAudPresent,
+			"aud claim must be a string or an array of non-empty strings")
 	case len(auds) == 0:
 		r.Fail(spec.JWTAudPresent, "aud claim empty")
 	default:
@@ -139,27 +144,35 @@ func checkClaims(r *report.Report, p map[string]any) {
 	}
 }
 
-func extractAud(p map[string]any) (values []string, present bool) {
+// extractAud reports the aud claim as a slice of strings along with two flags:
+// `present` (the key exists in the payload) and `valid` (the value is a
+// string or an array of non-empty strings, per RFC 7519). Mixed-type arrays
+// and non-string/non-array values are flagged invalid rather than silently
+// filtered, so the caller can distinguish a legitimately-empty claim from a
+// malformed one.
+func extractAud(p map[string]any) (values []string, valid, present bool) {
 	v, ok := p["aud"]
 	if !ok {
-		return nil, false
+		return nil, true, false
 	}
 	switch a := v.(type) {
 	case string:
 		if a == "" {
-			return nil, true
+			return nil, true, true
 		}
-		return []string{a}, true
+		return []string{a}, true, true
 	case []any:
 		out := make([]string, 0, len(a))
 		for _, x := range a {
-			if s, ok := x.(string); ok && s != "" {
-				out = append(out, s)
+			s, ok := x.(string)
+			if !ok || s == "" {
+				return nil, false, true
 			}
+			out = append(out, s)
 		}
-		return out, true
+		return out, true, true
 	}
-	return nil, true
+	return nil, false, true
 }
 
 func asUnix(v any) (int64, error) {

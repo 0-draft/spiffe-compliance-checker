@@ -102,6 +102,24 @@ func TestCheck(t *testing.T) {
 			wantFailed:     true,
 			wantContainAny: []string{`scheme MUST be "spiffe"`},
 		},
+		{
+			// Regression: aud as a number should be rejected as malformed,
+			// not silently treated as absent.
+			name:           "aud is a number",
+			header:         map[string]any{"alg": "RS256"},
+			payload:        map[string]any{"sub": "spiffe://example.com/a", "aud": 42, "exp": future},
+			wantFailed:     true,
+			wantContainAny: []string{"must be a string or an array"},
+		},
+		{
+			// Regression: aud as a mixed-type array (string + number) is
+			// invalid per RFC 7519.
+			name:           "aud array with non-string element",
+			header:         map[string]any{"alg": "RS256"},
+			payload:        map[string]any{"sub": "spiffe://example.com/a", "aud": []any{"ok", 7}, "exp": future},
+			wantFailed:     true,
+			wantContainAny: []string{"must be a string or an array"},
+		},
 	}
 
 	for _, tc := range cases {

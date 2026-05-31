@@ -1,14 +1,49 @@
 package bundle_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"math/big"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0-draft/spiffe-compliance-checker/internal/bundle"
 	"github.com/0-draft/spiffe-compliance-checker/internal/report"
 )
 
+// makeCertB64 returns a base64-encoded DER X.509 certificate suitable for
+// embedding in a JWKS x5c entry. Tests use it so the bundle checker's
+// "x5c MUST contain a parseable cert" assertion has something real to chew on.
+func makeCertB64(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		URIs:                  []*url.URL{{Scheme: "spiffe", Host: "example.com"}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(der)
+}
+
 func TestCheck(t *testing.T) {
+	certB64 := makeCertB64(t)
+
 	cases := []struct {
 		name           string
 		raw            string
@@ -21,7 +56,7 @@ func TestCheck(t *testing.T) {
 				"spiffe_sequence": 1,
 				"spiffe_refresh_hint": 300,
 				"keys": [
-					{"kty": "RSA", "use": "x509-svid", "x5c": ["MIIBdjCCARug"]},
+					{"kty": "RSA", "use": "x509-svid", "x5c": ["` + certB64 + `"]},
 					{"kty": "RSA", "use": "jwt-svid", "kid": "k1", "n": "abc", "e": "AQAB"}
 				]
 			}`,
@@ -42,7 +77,7 @@ func TestCheck(t *testing.T) {
 				"spiffe_sequence": 1,
 				"spiffe_refresh_hint": 300,
 				"keys": [
-					{"kty": "RSA", "use": "x509-svid", "kid": "nope", "x5c": ["MIIB..."]}
+					{"kty": "RSA", "use": "x509-svid", "kid": "nope", "x5c": ["` + certB64 + `"]}
 				]
 			}`,
 			wantFailed:     true,
@@ -90,7 +125,7 @@ func TestCheck(t *testing.T) {
 				"spiffe_sequence": 1,
 				"spiffe_refresh_hint": 300,
 				"keys": [
-					{"kty": "RSA", "use": "x509-svid", "x5c": ["A", "B"]}
+					{"kty": "RSA", "use": "x509-svid", "x5c": ["` + certB64 + `", "` + certB64 + `"]}
 				]
 			}`,
 			wantFailed:     true,
@@ -130,6 +165,44 @@ func TestCheck(t *testing.T) {
 			}`,
 			wantFailed:     false, // SHOULD-severity downgrade
 			wantContainAny: []string{"is not integer"},
+		},
+		{
+			// Regression: x5c content must be valid base64 + parseable cert.
+			name: "x5c not valid base64",
+			raw: `{
+				"spiffe_sequence": 1,
+				"spiffe_refresh_hint": 300,
+				"keys": [
+					{"kty": "RSA", "use": "x509-svid", "x5c": ["not---base64---!@#$"]}
+				]
+			}`,
+			wantFailed:     true,
+			wantContainAny: []string{"not valid base64"},
+		},
+		{
+			// Regression: base64 decodes but isn't a DER X.509 certificate.
+			name: "x5c is base64 but not a cert",
+			raw: `{
+				"spiffe_sequence": 1,
+				"spiffe_refresh_hint": 300,
+				"keys": [
+					{"kty": "RSA", "use": "x509-svid", "x5c": ["aGVsbG8gd29ybGQ="]}
+				]
+			}`,
+			wantFailed:     true,
+			wantContainAny: []string{"not a parseable X.509 cert"},
+		},
+		{
+			name: "x5c[0] is not a string",
+			raw: `{
+				"spiffe_sequence": 1,
+				"spiffe_refresh_hint": 300,
+				"keys": [
+					{"kty": "RSA", "use": "x509-svid", "x5c": [123]}
+				]
+			}`,
+			wantFailed:     true,
+			wantContainAny: []string{"want string"},
 		},
 	}
 
