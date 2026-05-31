@@ -33,9 +33,9 @@ func Check(r *report.Report, s string) {
 	}
 
 	checkScheme(r, u)
-	checkAuthority(r, u, s)
+	checkAuthority(r, u)
 	checkPath(r, u)
-	checkLengths(r, u, s)
+	checkLength(r, s)
 }
 
 func checkScheme(r *report.Report, u *url.URL) {
@@ -49,18 +49,18 @@ func checkScheme(r *report.Report, u *url.URL) {
 	r.Pass(spec.IDSchemeSpiffe, "")
 }
 
-func checkAuthority(r *report.Report, u *url.URL, raw string) {
-	host := u.Host
+func checkAuthority(r *report.Report, u *url.URL) {
+	host := u.Hostname()
+	port := u.Port()
+
 	if u.User != nil {
 		r.Fail(spec.IDNoUserinfo, "userinfo present in authority")
 	} else {
 		r.Pass(spec.IDNoUserinfo, "")
 	}
 
-	// url.URL.Host includes ":port" if present; split that out.
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		r.Fail(spec.IDNoPort, fmt.Sprintf("port=%q", host[i+1:]))
-		host = host[:i]
+	if port != "" {
+		r.Fail(spec.IDNoPort, fmt.Sprintf("port=%q", port))
 	} else {
 		r.Pass(spec.IDNoPort, "")
 	}
@@ -89,8 +89,6 @@ func checkAuthority(r *report.Report, u *url.URL, raw string) {
 	} else {
 		r.Pass(spec.IDTrustDomainLengthLimit, "")
 	}
-
-	_ = raw
 }
 
 func checkPath(r *report.Report, u *url.URL) {
@@ -141,8 +139,7 @@ func checkPath(r *report.Report, u *url.URL) {
 	}
 }
 
-func checkLengths(r *report.Report, u *url.URL, raw string) {
-	_ = u
+func checkLength(r *report.Report, raw string) {
 	if len(raw) > 2048 {
 		r.Fail(spec.IDLengthLimit, fmt.Sprintf("len=%d", len(raw)))
 	} else {
@@ -188,9 +185,5 @@ func Parse(s string) (trustDomain, path string, err error) {
 	if !strings.EqualFold(u.Scheme, "spiffe") {
 		return "", "", fmt.Errorf("scheme is %q, want spiffe", u.Scheme)
 	}
-	host := u.Host
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
-	}
-	return host, u.EscapedPath(), nil
+	return u.Hostname(), u.EscapedPath(), nil
 }

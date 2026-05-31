@@ -91,6 +91,14 @@ func TestCheck(t *testing.T) {
 			wantFailed:     true,
 			wantContainAny: []string{"at most 255 bytes"},
 		},
+		{
+			// Regression: u.Hostname() must strip IPv6 brackets so the
+			// charset check sees the raw "::1" and rejects it on `:`.
+			name:           "IPv6 bracketed trust domain",
+			in:             "spiffe://[::1]/foo",
+			wantFailed:     true,
+			wantContainAny: []string{"trust domain MUST contain only"},
+		},
 	}
 
 	for _, tc := range cases {
